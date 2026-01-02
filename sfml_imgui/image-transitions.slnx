@@ -1,0 +1,19 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+  </Configurations>
+  <Project Path="sfml_imgui/sfml_imgui.vcxproj" Id="5595928e-8f31-4d43-8b0b-8bb63dd38a46">
+    <BuildDependency Project="SFML/sfml-graphics.vcxproj" />
+    <BuildDependency Project="SFML/sfml-system.vcxproj" />
+    <BuildDependency Project="SFML/sfml-window.vcxproj" />
+  </Project>  
+  <Project Path="SFML/sfml-graphics.vcxproj" Id="9200a7fe-f8cc-3faa-a3fa-346886c9f40a">
+    <Platform Project="x64" />
+  </Project>
+  <Project Path="SFML/sfml-system.vcxproj" Id="18f9dddd-64c2-3c9a-8803-180ca02dfa4c">
+    <Platform Project="x64" />
+  </Project>
+  <Project Path="SFML/sfml-window.vcxproj" Id="43889796-6b01-3c61-900a-1fe24f4bf877">
+    <Platform Project="x64" />
+  </Project>
+</Solution>
