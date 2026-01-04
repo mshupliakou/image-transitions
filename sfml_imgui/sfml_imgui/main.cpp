@@ -104,6 +104,41 @@ void SetupModernStyle()
     colors[ImGuiCol_Text] = ImVec4(0.90f, 0.90f, 0.95f, 1.00f); // Almost white text
 }
 
+// --- SHADER ROZMYCIA (BLUR) ---
+const std::string blurShaderCode = R"(
+    uniform sampler2D texture;
+    uniform float blurRadius; // 0.0 do 1.0
+
+    void main() {
+        vec2 texCoord = gl_TexCoord[0].xy;
+        vec4 pixel = texture2D(texture, texCoord);
+        
+        if (blurRadius < 0.001) {
+            gl_FragColor = pixel * gl_Color;
+            return;
+        }
+
+        vec4 sum = vec4(0.0);
+        float weightSum = 0.0;
+        
+        // ZMIANA KRYTYCZNA: Ekstremalnie mały krok (0.00005).
+        // To skleja próbki w jednolitą masę.
+        float spread = blurRadius * 0.00005; 
+
+        // Pętla 17x17 (289 próbek na piksel)
+        for (float x = -8.0; x <= 8.0; x += 1.0) {
+            for (float y = -8.0; y <= 8.0; y += 1.0) {
+                float weight = exp(-(x*x + y*y) / 40.0);
+                vec2 offset = vec2(x, y) * spread;
+                sum += texture2D(texture, texCoord + offset) * weight;
+                weightSum += weight;
+            }
+        }
+        
+        gl_FragColor = (sum / weightSum) * gl_Color;
+    }
+)";
+
 // --- CORE RENDERING LOGIC ---
 // This function calculates the mathematics for every transition.
 // It is designed to work with ANY RenderTarget (Window for preview, or RenderTexture for saving).
@@ -284,6 +319,50 @@ void RenderTransitionFrame(sf::RenderTarget& target, int type, float progress,
         s2.setPosition({ ex, 0.0f });
     }
     break;
+
+    case 11: // Blur Fade
+    {
+        // 1. Loading
+        static sf::Shader shader;
+        static bool loaded = false;
+        if (!loaded) {
+            if (shader.loadFromMemory(blurShaderCode, sf::Shader::Type::Fragment)) {
+                shader.setUniform("texture", sf::Shader::CurrentTexture);
+            }
+            loaded = true;
+        }
+
+        // 2. Strength
+        float blurStrength = 0.0f;
+        if (progress <= 0.5f) {
+            blurStrength = progress * 2.0f;
+        }
+        else {
+            blurStrength = (1.0f - progress) * 2.0f;
+        }
+
+        shader.setUniform("blurRadius", blurStrength * 150.0f);
+
+        // 3. RDrawing
+        s1.setColor(sf::Color::White);
+        s2.setColor(sf::Color::White);
+
+        if (progress <= 0.01f) target.draw(s1);
+        else if (progress >= 0.99f) target.draw(s2);
+        else {
+            if (progress < 0.45f) target.draw(s1, &shader);
+            else if (progress > 0.55f) target.draw(s2, &shader);
+            else {
+                float mix = (progress - 0.45f) * 10.0f;
+                s1.setColor({ 255, 255, 255, (std::uint8_t)(255 * (1.0f - mix)) });
+                target.draw(s1, &shader);
+                s2.setColor({ 255, 255, 255, (std::uint8_t)(255 * mix) });
+                target.draw(s2, &shader);
+            }
+        }
+        return;
+    }
+    break;
     }
 
     // 3. DRAWING
@@ -338,7 +417,8 @@ int main()
     const char* transitionNames[] = {
         "Slide Left", "Slide Right", "Slide Top", "Slide Bottom",
         "Box In", "Box Out", "Fade to Black", "Cross-Fade",
-        "Page Turn Horizontal", "Page Turn Vertical", "Shutter Open"
+        "Page Turn Horizontal", "Page Turn Vertical", "Shutter Open",
+        "Blur Fade"
     };
 
     sf::Clock deltaClock;
