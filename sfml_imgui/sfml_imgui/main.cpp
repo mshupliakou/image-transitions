@@ -40,6 +40,8 @@ const std::string lumaShaderCode = R"(
 #include <commdlg.h>  // Standard Open File Dialog library
 #include <shellapi.h> // For ShellExecute (to open folder in Windows Explorer)
 #include <shlobj.h>   // For SHBrowseForFolder (Folder selection dialog)
+#include <vector>
+#include <cstring> 
 
 // --- HELPER FUNCTION: OPEN FILE DIALOG ---
 // Opens a native Windows dialog to select an image file.
@@ -126,43 +128,72 @@ void SetupModernStyle()
     colors[ImGuiCol_Header] = ImVec4(0.44f, 0.37f, 0.80f, 0.40f);
     colors[ImGuiCol_HeaderHovered] = ImVec4(0.44f, 0.37f, 0.80f, 0.60f);
     colors[ImGuiCol_HeaderActive] = ImVec4(0.44f, 0.37f, 0.80f, 0.80f);
-    colors[ImGuiCol_Text] = ImVec4(0.90f, 0.90f, 0.95f, 1.00f); // Almost white text
+    colors[ImGuiCol_Text] = ImVec4(0.90f, 0.90f, 0.95f, 1.00f); 
 }
 
 // --- SHADER ROZMYCIA (BLUR) ---
-const std::string blurShaderCode = R"(
-    uniform sampler2D texture;
-    uniform float blurRadius; // 0.0 do 1.0
-
-    void main() {
-        vec2 texCoord = gl_TexCoord[0].xy;
-        vec4 pixel = texture2D(texture, texCoord);
-        
-        if (blurRadius < 0.001) {
-            gl_FragColor = pixel * gl_Color;
-            return;
-        }
-
-        vec4 sum = vec4(0.0);
-        float weightSum = 0.0;
-        
-        // ZMIANA KRYTYCZNA: Ekstremalnie mały krok (0.00005).
-        // To skleja próbki w jednolitą masę.
-        float spread = blurRadius * 0.00005; 
-
-        // Pętla 17x17 (289 próbek na piksel)
-        for (float x = -8.0; x <= 8.0; x += 1.0) {
-            for (float y = -8.0; y <= 8.0; y += 1.0) {
-                float weight = exp(-(x*x + y*y) / 40.0);
-                vec2 offset = vec2(x, y) * spread;
-                sum += texture2D(texture, texCoord + offset) * weight;
-                weightSum += weight;
-            }
-        }
-        
-        gl_FragColor = (sum / weightSum) * gl_Color;
+void ApplyCpuBlur(const sf::Image& src, sf::Image& dst, int radius) {
+    if (radius < 1) {
+        dst = src;
+        return;
     }
-)";
+
+    sf::Vector2u size = src.getSize();
+
+    if (dst.getSize() != size) dst.resize(size);
+
+    const std::uint8_t* srcPixels = src.getPixelsPtr();
+
+    std::vector<std::uint8_t> dstPixels(size.x * size.y * 4);
+    std::vector<std::uint8_t> tempPixels(size.x * size.y * 4);
+
+    // 1. PRZEBIEG POZIOMY (X)
+    for (unsigned int y = 0; y < size.y; ++y) {
+        for (unsigned int x = 0; x < size.x; ++x) {
+            int r = 0, g = 0, b = 0, count = 0;
+
+            for (int k = -radius; k <= radius; ++k) {
+                int nx = (int)x + k;
+                if (nx >= 0 && nx < (int)size.x) {
+                    int index = (y * size.x + nx) * 4;
+                    r += srcPixels[index + 0];
+                    g += srcPixels[index + 1];
+                    b += srcPixels[index + 2];
+                    count++;
+                }
+            }
+            int destIndex = (y * size.x + x) * 4;
+            tempPixels[destIndex + 0] = r / count;
+            tempPixels[destIndex + 1] = g / count;
+            tempPixels[destIndex + 2] = b / count;
+            tempPixels[destIndex + 3] = 255;
+        }
+    }
+
+    // 2. PRZEBIEG PIONOWY (Y)
+    for (unsigned int x = 0; x < size.x; ++x) {
+        for (unsigned int y = 0; y < size.y; ++y) {
+            int r = 0, g = 0, b = 0, count = 0;
+
+            for (int k = -radius; k <= radius; ++k) {
+                int ny = (int)y + k;
+                if (ny >= 0 && ny < (int)size.y) {
+                    int index = (ny * size.x + x) * 4;
+                    r += tempPixels[index + 0];
+                    g += tempPixels[index + 1];
+                    b += tempPixels[index + 2];
+                    count++;
+                }
+            }
+            int destIndex = (y * size.x + x) * 4;
+            dstPixels[destIndex + 0] = r / count;
+            dstPixels[destIndex + 1] = g / count;
+            dstPixels[destIndex + 2] = b / count;
+            dstPixels[destIndex + 3] = 255;
+        }
+    }
+    std::memcpy(const_cast<std::uint8_t*>(dst.getPixelsPtr()), dstPixels.data(), dstPixels.size());
+}
 
 // --- CORE RENDERING LOGIC ---
 // This function calculates the mathematics for every transition.
@@ -350,44 +381,80 @@ void RenderTransitionFrame(sf::RenderTarget& target, int type, float progress,
 
     case 11: // Blur Fade
     {
-        // 1. Loading
-        static sf::Shader shader;
-        static bool loaded = false;
-        if (!loaded) {
-            if (shader.loadFromMemory(blurShaderCode, sf::Shader::Type::Fragment)) {
-                shader.setUniform("texture", sf::Shader::CurrentTexture);
-            }
-            loaded = true;
-        }
+        // 1. Kopiujemy tekstury z karty graficznej do RAM (sf::Image)
+        sf::Image img1 = t1.copyToImage();
+        sf::Image img2 = t2.copyToImage();
+        sf::Image blurredImg; 
 
-        // 2. Strength
-        float blurStrength = 0.0f;
-        if (progress <= 0.5f) {
-            blurStrength = progress * 2.0f;
+        // Maksymalny promień rozmycia
+        int maxBlur = 12;
+        int currentBlur = 0;
+
+        // Faza 1: Rozmywanie obrazu 1 (0.0 -> 0.45)
+        if (progress <= 0.45f) {
+            // Obliczamy siłę rozmycia
+            currentBlur = (int)(progress * 2.2f * maxBlur);
+
+            ApplyCpuBlur(img1, blurredImg, currentBlur);
+
+            // Wrzucamy wynik na tymczasową teksturę, żeby go wyświetlić na ekranie
+            static sf::Texture tempTex;
+            tempTex.loadFromImage(blurredImg);
+
+            sf::Sprite tempSprite(tempTex);
+            // Skalujemy tak, żeby pasowało do okna
+            sf::Vector2u sz = tempTex.getSize();
+            tempSprite.setScale({ 1200.0f / sz.x, 800.0f / sz.y }); 
+            target.draw(tempSprite);
         }
+        // Faza 3: Wyostrzanie obrazu 2 (0.55 -> 1.0)
+        else if (progress >= 0.55f) {
+            // Obliczamy siłę rozmycia (maleje)
+            float localP = (progress - 0.55f) / 0.45f;
+            currentBlur = (int)((1.0f - localP) * maxBlur);
+
+            ApplyCpuBlur(img2, blurredImg, currentBlur);
+
+            static sf::Texture tempTex;
+            tempTex.loadFromImage(blurredImg);
+
+            sf::Sprite tempSprite(tempTex);
+            sf::Vector2u sz = tempTex.getSize();
+            tempSprite.setScale({ 1200.0f / sz.x, 800.0f / sz.y });
+            target.draw(tempSprite);
+        }
+        // Faza 2: Środek (0.45 -> 0.55) - Mieszanie dwóch mocno rozmytych
         else {
-            blurStrength = (1.0f - progress) * 2.0f;
+            // W tej fazie oba obrazy są maksymalnie rozmyte
+            sf::Image b1, b2;
+            ApplyCpuBlur(img1, b1, maxBlur);
+            ApplyCpuBlur(img2, b2, maxBlur);
+
+            // Ładujemy je do tekstur
+            static sf::Texture tex1, tex2;
+            tex1.loadFromImage(b1);
+            tex2.loadFromImage(b2);
+
+            sf::Sprite sA(tex1);
+            sf::Sprite sB(tex2);
+
+            sf::Vector2u sz1 = tex1.getSize();
+            sf::Vector2u sz2 = tex2.getSize();
+            sA.setScale({ 1200.0f / sz1.x, 800.0f / sz1.y });
+            sB.setScale({ 1200.0f / sz2.x, 800.0f / sz2.y });
+
+            // Alpha Blending (Mieszanie przezroczystości)
+            float mix = (progress - 0.45f) * 10.0f; 
+
+            // Obraz 1 zanika
+            sA.setColor({ 255, 255, 255, (std::uint8_t)(255 * (1.0f - mix)) });
+            // Obraz 2 się pojawia
+            sB.setColor({ 255, 255, 255, (std::uint8_t)(255 * mix) });
+
+            target.draw(sA);
+            target.draw(sB);
         }
 
-        shader.setUniform("blurRadius", blurStrength * 150.0f);
-
-        // 3. RDrawing
-        s1.setColor(sf::Color::White);
-        s2.setColor(sf::Color::White);
-
-        if (progress <= 0.01f) target.draw(s1);
-        else if (progress >= 0.99f) target.draw(s2);
-        else {
-            if (progress < 0.45f) target.draw(s1, &shader);
-            else if (progress > 0.55f) target.draw(s2, &shader);
-            else {
-                float mix = (progress - 0.45f) * 10.0f;
-                s1.setColor({ 255, 255, 255, (std::uint8_t)(255 * (1.0f - mix)) });
-                target.draw(s1, &shader);
-                s2.setColor({ 255, 255, 255, (std::uint8_t)(255 * mix) });
-                target.draw(s2, &shader);
-            }
-        }
         return;
     }
     break;
