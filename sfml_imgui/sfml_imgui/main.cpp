@@ -8,31 +8,6 @@
 // Create an alias for std::filesystem to save typing
 namespace fs = std::filesystem;
 
-// --- SHADER CODE: LUMA WIPE (BRIGHTNESS TRANSITION) ---
-// This GLSL shader calculates the brightness of each pixel.
-// Bright pixels appear first (at low progress), dark pixels appear last.
-const std::string lumaShaderCode = R"(
-    uniform sampler2D texture;
-    uniform float progress;
-
-    void main() {
-        vec2 coord = gl_TexCoord[0].xy;
-        vec4 pixel = texture2D(texture, coord);
-        
-        // Luminance calculation 
-        float luma = dot(pixel.rgb, vec3(0.299, 0.587, 0.114));
-        
-        // FIX: Expand the range from 1.0 to -0.1 to ensure full coverage
-        // When progress is 1.0, threshold is -0.1. 
-        // smoothstep(-0.1, 0.0, luma) will return 1.0 for any luma >= 0.0
-        float threshold = 1.0 - (progress * 1.1);
-        float alpha = smoothstep(threshold, threshold + 0.1, luma);
-        
-        gl_FragColor = vec4(pixel.rgb, pixel.a * alpha);
-    }
-)";
-
-
 // --- WINDOWS API BLOCK ---
 // We need Windows API for file/folder dialogs and opening Explorer.
 #define NOMINMAX      // Prevents Windows headers from defining min/max macros that conflict with std::min/std::max
@@ -129,6 +104,70 @@ void SetupModernStyle()
     colors[ImGuiCol_HeaderHovered] = ImVec4(0.44f, 0.37f, 0.80f, 0.60f);
     colors[ImGuiCol_HeaderActive] = ImVec4(0.44f, 0.37f, 0.80f, 0.80f);
     colors[ImGuiCol_Text] = ImVec4(0.90f, 0.90f, 0.95f, 1.00f); 
+}
+
+// --- SHADER CODE: LUMA WIPE (BRIGHTNESS TRANSITION) ---
+void ApplyCpuLumaWipe(const sf::Image& imgA, const sf::Image& imgB, sf::Image& dst, float progress) {
+    sf::Vector2u sizeA = imgA.getSize();
+    sf::Vector2u sizeB = imgB.getSize(); // Potrzebujemy wymiarów drugiego zdjęcia
+
+    // Ustawiamy rozmiar wyniku taki sam jak zdjęcia bazowego (A)
+    if (dst.getSize() != sizeA) dst.resize(sizeA);
+
+    const std::uint8_t* pA = imgA.getPixelsPtr();
+    const std::uint8_t* pB = imgB.getPixelsPtr();
+
+    // Bufor na wynik
+    std::vector<std::uint8_t> resultPixels(sizeA.x * sizeA.y * 4);
+
+    // Próg jasności (0..255)
+    int threshold = static_cast<int>((1.0f - progress) * 255.0f);
+
+    // Pętla po każdym pikselu obrazu DOCELOWEGO (czyli rozmiary A)
+    for (unsigned int y = 0; y < sizeA.y; ++y) {
+        for (unsigned int x = 0; x < sizeA.x; ++x) {
+
+            // 1. Indeks piksela w obrazie A (i w wyniku)
+            size_t idxA = (y * sizeA.x + x) * 4;
+
+            // 2. Skalowanie współrzędnych dla obrazu B
+            // Jeśli B jest mniejsze, musimy "sięgnąć" w odpowiednie miejsce.
+            // Wzór: xB = xA * (szerokośćB / szerokośćA)
+            unsigned int xB = (x * sizeB.x) / sizeA.x;
+            unsigned int yB = (y * sizeB.y) / sizeA.y;
+
+            // Zabezpieczenie przed wyjściem poza tablicę (gdyby zaokrąglenie poszło w górę)
+            if (xB >= sizeB.x) xB = sizeB.x - 1;
+            if (yB >= sizeB.y) yB = sizeB.y - 1;
+
+            size_t idxB = (yB * sizeB.x + xB) * 4;
+
+            // Pobieramy kolory z B (skalowanego)
+            uint8_t rB = pB[idxB];
+            uint8_t gB = pB[idxB + 1];
+            uint8_t bB = pB[idxB + 2];
+
+            // Obliczamy jasność piksela B
+            int luma = (299 * rB + 587 * gB + 114 * bB) / 1000;
+
+            // Decyzja: A czy B?
+            if (luma >= threshold) {
+                // Rysujemy B
+                resultPixels[idxA] = rB;
+                resultPixels[idxA + 1] = gB;
+                resultPixels[idxA + 2] = bB;
+                resultPixels[idxA + 3] = 255;
+            }
+            else {
+                // Rysujemy A
+                resultPixels[idxA] = pA[idxA];
+                resultPixels[idxA + 1] = pA[idxA + 1];
+                resultPixels[idxA + 2] = pA[idxA + 2];
+                resultPixels[idxA + 3] = 255;
+            }
+        }
+    }
+    std::memcpy(const_cast<std::uint8_t*>(dst.getPixelsPtr()), resultPixels.data(), resultPixels.size());
 }
 
 // --- SHADER ROZMYCIA (BLUR) ---
@@ -698,31 +737,27 @@ void RenderTransitionFrame(sf::RenderTarget& target, int type, float progress,
 
         return;
     }
-    case 14: // Luma Wipe (Brightness Based)
+
+    case 14: // Luma Wipe 
     {
-        // 1. Load the shader (only once)
-        static sf::Shader lumaShader;
-        static bool loaded = false;
-        if (!loaded) {
-            // Load from the string constant defined at the top of the file
-            if (lumaShader.loadFromMemory(lumaShaderCode, sf::Shader::Type::Fragment)) {
-                // Tell shader which texture to use (optional in SFML but good practice)
-                lumaShader.setUniform("texture", sf::Shader::CurrentTexture);
-            }
-            loaded = true;
-        }
+        // Kopiujemy dane do RAM
+        sf::Image img1 = t1.copyToImage();
+        sf::Image img2 = t2.copyToImage();
+        sf::Image finalImg;
 
-        // 2. Pass the progress to the shader
-        lumaShader.setUniform("progress", progress);
+        ApplyCpuLumaWipe(img1, img2, finalImg, progress);
 
-        // 3. Draw Setup
-        // We draw Image 1 normally as the background.
-        // We draw Image 2 ON TOP using the shader. 
-        // The shader will make parts of Image 2 transparent based on brightness.
-        target.draw(s1); // Background
-        target.draw(s2, &lumaShader); // Foreground with Luma Mask
+        // Wyświetlamy wynik
+        static sf::Texture tempTex;
+        tempTex.loadFromImage(finalImg);
 
-        return; // Exit early since we handled drawing manually
+        sf::Sprite s(tempTex);
+        // Skalowanie do okna 1200x800
+        sf::Vector2u sz = tempTex.getSize();
+        s.setScale({ 1200.0f / sz.x, 800.0f / sz.y });
+
+        target.draw(s);
+        return;
     }
     break;
         
