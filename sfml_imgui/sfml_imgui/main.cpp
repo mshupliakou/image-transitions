@@ -321,7 +321,7 @@ void RenderTransitionFrame(sf::RenderTarget& target, int type, float progress,
     }
     break;
 
-    case 11: // Luma Wipe (Brightness Based)
+    case 14: // Luma Wipe (Brightness Based)
     {
         // 1. Load the shader (only once)
         static sf::Shader lumaShader;
