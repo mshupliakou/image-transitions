@@ -13,32 +13,21 @@ namespace fs = std::filesystem;
 // Bright pixels appear first (at low progress), dark pixels appear last.
 const std::string lumaShaderCode = R"(
     uniform sampler2D texture;
-    uniform float progress; // Value from 0.0 to 1.0
+    uniform float progress;
 
     void main() {
-        // Get the coordinate of the current pixel
         vec2 coord = gl_TexCoord[0].xy;
-        
-        // Get the color of the pixel from the texture
         vec4 pixel = texture2D(texture, coord);
         
-        // Calculate Luminance (Perceived Brightness)
-        // We use standard Rec. 601 coefficients: Red 30%, Green 59%, Blue 11%
+        // Luminance calculation 
         float luma = dot(pixel.rgb, vec3(0.299, 0.587, 0.114));
         
-        // Logic: 
-        // We want bright pixels (luma ~1.0) to appear EARLY (when progress is low).
-        // We want dark pixels (luma ~0.0) to appear LATE (when progress is high).
-        
-        // Threshold moves from 1.0 down to 0.0 as progress goes 0.0 -> 1.0
-        float threshold = 1.0 - progress;
-        
-        // Calculate Alpha (Transparency)
-        // If pixel_brightness > threshold, alpha becomes 1.0 (Visible).
-        // smoothstep is used to create a soft edge instead of a harsh pixelated line.
+        // FIX: Expand the range from 1.0 to -0.1 to ensure full coverage
+        // When progress is 1.0, threshold is -0.1. 
+        // smoothstep(-0.1, 0.0, luma) will return 1.0 for any luma >= 0.0
+        float threshold = 1.0 - (progress * 1.1);
         float alpha = smoothstep(threshold, threshold + 0.1, luma);
         
-        // Output the pixel with the modified alpha
         gl_FragColor = vec4(pixel.rgb, pixel.a * alpha);
     }
 )";
