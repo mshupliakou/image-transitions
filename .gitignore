@@ -21,3 +21,4 @@ obj/
 
 !sfml_imgui/SFML/**/*.lib
 !sfml_imgui/SFML/**/*.dll
+sfml_imgui/sfml_imgui/SavedAnimation/

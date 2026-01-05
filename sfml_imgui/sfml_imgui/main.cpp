@@ -198,6 +198,7 @@ void RenderTransitionFrame(sf::RenderTarget& target, int type, float progress,
         s1.setColor(sf::Color::White); // Reset Alpha/Opacity to 100%
         s1.setOrigin({ 0.f, 0.f });    // Reset Pivot Point to top-left
         s1.setPosition({ 0.f, 0.f });  // Reset Position to top-left
+        s1.setRotation(sf::degrees(0.f)); // Reset Rotation
         sf::Vector2u sz1 = t1.getSize();
         s1.setScale({ width / sz1.x, height / sz1.y }); // Fit to screen
     }
@@ -205,6 +206,7 @@ void RenderTransitionFrame(sf::RenderTarget& target, int type, float progress,
         s2.setColor(sf::Color::White);
         s2.setOrigin({ 0.f, 0.f });
         s2.setPosition({ 0.f, 0.f });
+        s2.setRotation(sf::degrees(0.f));
         sf::Vector2u sz2 = t2.getSize();
         s2.setScale({ width / sz2.x, height / sz2.y });
     }
@@ -667,7 +669,53 @@ void RenderTransitionFrame(sf::RenderTarget& target, int type, float progress,
         return; // Exit early since we handled drawing manually
     }
     break;
+        
+    case 15: // Fly Away (Zdmuchiwanie)
+    {
+        sf::Vector2u sz1 = t1.getSize();
+        sf::Vector2u sz2 = t2.getSize();
+        sf::Vector2f center(width / 2.f, height / 2.f);
+
+        if (progress <= 0.5f) {
+            // PHASE 1: Image 1 flies away 
+            float lp = progress * 2.0f; // Local progress for first half (0.0 to 1.0)
+            float invLp = 1.0f - lp;
+
+            // Set pivot to center for scaling and rotation
+            s1.setOrigin({ (float)sz1.x / 2.f, (float)sz1.y / 2.f });
+            s1.setPosition(center);
+            s1.setScale({ (width / sz1.x) * invLp, (height / sz1.y) * invLp });
+
+            // Shrink scale to 0 and rotate by 180 degrees
+            s1.setRotation(sf::degrees(lp * 180.0f));
+
+            // Smooth fade out
+            s1.setColor({ 255, 255, 255, (std::uint8_t)(255 * invLp) });
+
+            target.clear(sf::Color::Black);
+            target.draw(s1);
         }
+        else {
+            // PHASE 2: Image 2 flies in
+            float lp = (progress - 0.5f) * 2.0f;
+
+            s2.setOrigin({ (float)sz2.x / 2.f, (float)sz2.y / 2.f });
+            s2.setPosition(center);
+            s2.setScale({ (width / sz2.x) * lp, (height / sz2.y) * lp });
+
+            // Grow scale from 0 to 1.0 and unspin rotation
+            s2.setRotation(sf::degrees((1.0f - lp) * -180.0f));
+
+            s2.setColor({ 255, 255, 255, (std::uint8_t)(255 * lp) });
+
+            target.clear(sf::Color::Black);
+            target.draw(s2);
+        }
+        return;
+    }
+
+
+    }
 
 
     // 3. DRAWING
@@ -723,7 +771,7 @@ int main()
         "Slide Left", "Slide Right", "Slide Top", "Slide Bottom",
         "Box In", "Box Out", "Fade to Black", "Cross-Fade",
         "Page Turn Horizontal", "Page Turn Vertical", "Shutter Open",
-        "Blur Fade", "3D CUbe Rotation", "Ring", "Luma Brightness"
+        "Blur Fade", "3D CUbe Rotation", "Ring", "Luma Wipe (Brightness)", "Fly Away"
     };
 
     sf::Clock deltaClock;
