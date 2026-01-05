@@ -184,6 +184,7 @@ void RenderTransitionFrame(sf::RenderTarget& target, int type, float progress,
     int drawMode = 0; // 0=Draw Both, 1=Draw Only Sprite 1, 2=Draw Only Sprite 2
     float xOffset = 0.0f, yOffset = 0.0f;
 
+
     switch (type) {
     case 0: // Slide Left
         // Sprite 2 moves from Right (width) to Center (0)
@@ -363,7 +364,249 @@ void RenderTransitionFrame(sf::RenderTarget& target, int type, float progress,
         return;
     }
     break;
+
+    case 12: // Cube Rotate 90°
+    {
+        // 1. QUALITY SETTINGS
+        t1.setSmooth(true);
+        t2.setSmooth(true);
+
+        // CONFIGURATION
+        float cx = width / 2.f;
+        float cy = height / 2.f;
+        float fov = 800.f;
+
+        // Number of strips (TriangleStrip). 
+        // 96 strips ensure the image is rigid (no waving effect) 
+        // while maintaining the full sharpness of the texture.
+        const int STRIPS = 96;
+
+        float angle = progress * 1.5707963f; // 0..90 degrees
+
+        // 2. SCALING (MAINTAIN ORIGINAL ASPECT RATIO)
+        sf::Vector2f scale1 = s1.getScale();
+        sf::Vector2f scale2 = s2.getScale();
+
+        // Wall dimensions calculated based on the sprite scale declared earlier
+        float faceW = t1.getSize().x * scale1.x;
+        float faceH = t1.getSize().y * scale1.y;
+
+        // Depth of the cube equals the width of the second image
+        float cubeDepth = t2.getSize().x * scale2.x;
+        float halfD = cubeDepth / 2.0f;
+
+        //3. MATH HELPERS
+
+        auto transformPoint = [&](sf::Vector3f p) -> sf::Vector3f {
+            float pz = p.z - halfD;
+            float px = p.x;
+            float c = std::cos(angle);
+            float s = std::sin(angle);
+            // Rotate around Y axis
+            return { px * c + pz * s, p.y, -px * s + pz * c + halfD };
+            };
+
+        auto project = [&](sf::Vector3f p) -> sf::Vector2f {
+            float scale = fov / (fov + p.z);
+            return { cx + p.x * scale, cy + p.y * scale };
+            };
+
+        // Shading calculation
+        auto getShade = [&](float baseAngle) -> sf::Color {
+            float currentAngle = std::abs(baseAngle - std::abs(progress * 90.0f));
+            float rad = currentAngle * 0.017453f;
+            float light = std::cos(rad);
+            if (light < 0) light = 0;
+
+            float brightness = 0.6f + (light * 0.4f);
+            std::uint8_t val = static_cast<std::uint8_t>(255 * brightness);
+            return sf::Color(val, val, val);
+            };
+
+        sf::Color shade1 = getShade(0.0f);
+        sf::Color shade2 = getShade(90.0f);
+
+        // 4. DRAWING WITH TRIANGLE STRIP
+        auto drawStripMesh = [&](sf::Texture& tex, sf::Color col, bool isSideFace)
+            {
+                sf::VertexArray va(sf::PrimitiveType::TriangleStrip, (STRIPS + 1) * 2);
+
+                float localW = faceW;
+                float localH = faceH;
+
+                float startX = -localW / 2.0f;
+                float yTop = -localH / 2.0f;
+                float yBot = localH / 2.0f;
+
+                for (int i = 0; i <= STRIPS; ++i)
+                {
+                    float u = (float)i / STRIPS; // 0.0 -> 1.0
+
+                    sf::Vector3f pTop, pBot;
+
+                    if (!isSideFace) {
+                        // FRONT FACE
+                        float x = startX + (u * localW);
+                        pTop = { x, yTop, 0.0f };
+                        pBot = { x, yBot, 0.0f };
+                    }
+                    else {
+                        // SIDE FACE
+                        float z = u * cubeDepth;
+                        float fixedX = localW / 2.0f;
+                        pTop = { fixedX, yTop, z };
+                        pBot = { fixedX, yBot, z };
+                    }
+
+                    pTop = transformPoint(pTop);
+                    pBot = transformPoint(pBot);
+
+                    sf::Vector2f sTop = project(pTop);
+                    sf::Vector2f sBot = project(pBot);
+
+                    // Texture mapping 1:1
+                    float tx = u * tex.getSize().x;
+                    float tyTop = 0.0f;
+                    float tyBot = (float)tex.getSize().y;
+
+                    int idx = i * 2;
+                    va[idx].position = sTop;
+                    va[idx].texCoords = { tx, tyTop };
+                    va[idx].color = col;
+
+                    va[idx + 1].position = sBot;
+                    va[idx + 1].texCoords = { tx, tyBot };
+                    va[idx + 1].color = col;
+                }
+
+                sf::RenderStates rs;
+                rs.texture = &tex;
+                target.draw(va, rs);
+            };
+
+        target.clear(sf::Color::Black);
+
+        //5. RENDERING (Depth Sorting)
+        sf::Vector3f tf = transformPoint({ 0.f, 0.f, 0.f });
+        sf::Vector3f ts = transformPoint({ faceW / 2.f, 0.f, cubeDepth / 2.f });
+
+        if (tf.z > ts.z) {
+            drawStripMesh(t1, shade1, false);
+            drawStripMesh(t2, shade2, true);
+        }
+        else {
+            drawStripMesh(t2, shade2, true);
+            drawStripMesh(t1, shade1, false);
+        }
+
+        return;
     }
+
+
+    case 13: // Ring Transition 
+    {
+        float cx = width / 2.f;
+        float cy = height / 2.f;
+
+        float radius = 1000.f;  // Orbit radius (how far sideways it moves)
+        float depth = 670.f;  // Perspective: lower value = stronger "3D" effect (fisheye)
+
+        // Convert progress (0..1) to radians (0..PI/2)
+        float a1 = progress * 1.5707963f;          // Image 1: 0 -> 90 degrees
+		float a2 = (1.0f - progress) * 1.5707963f; // Image 2: 90 -> 0 degrees
+
+        auto ringPos = [&](float angle, float sideSign)
+            {
+                // sideSign: +1 = right, -1 = left
+                float x = sideSign * (radius - std::cos(angle) * radius);
+                float z = std::sin(angle) * radius;
+                float s = depth / (depth + z); // Perspective scale factor (0.0 to 1.0)
+                return std::tuple<float, float, float>(x, z, s);
+            };
+
+        
+        // IMAGE 1 - Starts at center, moves right along the arc
+        auto [x1, z1, s1] = ringPos(a1, +1.f);
+
+        sf::VertexArray quad1(sf::PrimitiveType::Triangles, 6);
+
+        // NOTE: Calculations are based on CANVAS size, not texture size
+        float w1 = width * s1;
+        float h1 = height * s1;
+
+        float left1 = cx + x1 - w1 / 2.f;
+        float top1 = cy - h1 / 2.f;
+        float right1 = left1 + w1;
+        float bottom1 = top1 + h1;
+
+        // Set vertex positions
+        quad1[0].position = { left1,  top1 };
+        quad1[1].position = { right1, top1 };
+        quad1[2].position = { right1, bottom1 };
+        quad1[3].position = { left1,  top1 };
+        quad1[4].position = { right1, bottom1 };
+        quad1[5].position = { left1,  bottom1 };
+
+        // Texture Coordinates - Map full texture
+        quad1[0].texCoords = { 0.f, 0.f };
+        quad1[1].texCoords = { (float)t1.getSize().x, 0.f };
+        quad1[2].texCoords = { (float)t1.getSize().x, (float)t1.getSize().y };
+        quad1[3].texCoords = { 0.f, 0.f };
+        quad1[4].texCoords = { (float)t1.getSize().x, (float)t1.getSize().y };
+        quad1[5].texCoords = { 0.f, (float)t1.getSize().y };
+
+
+        // IMAGE 2 - Starts at left (background), moves towards center
+        auto [x2, z2, s2] = ringPos(a2, -1.f);
+
+        sf::VertexArray quad2(sf::PrimitiveType::Triangles, 6);
+
+        float w2 = width * s2;
+        float h2 = height * s2;
+
+        float left2 = cx + x2 - w2 / 2.f;
+        float top2 = cy - h2 / 2.f;
+        float right2 = left2 + w2;
+        float bottom2 = top2 + h2;
+
+        quad2[0].position = { left2,  top2 };
+        quad2[1].position = { right2, top2 };
+        quad2[2].position = { right2, bottom2 };
+        quad2[3].position = { left2,  top2 };
+        quad2[4].position = { right2, bottom2 };
+        quad2[5].position = { left2,  bottom2 };
+
+        quad2[0].texCoords = { 0.f, 0.f };
+        quad2[1].texCoords = { (float)t2.getSize().x, 0.f };
+        quad2[2].texCoords = { (float)t2.getSize().x, (float)t2.getSize().y };
+        quad2[3].texCoords = { 0.f, 0.f };
+        quad2[4].texCoords = { (float)t2.getSize().x, (float)t2.getSize().y };
+        quad2[5].texCoords = { 0.f, (float)t2.getSize().y };
+
+        // PERSPECTIVE DRAWING (Depth Sorting)
+        target.clear(sf::Color::Black);
+
+        sf::RenderStates rs1;
+        rs1.texture = &t1;
+
+        sf::RenderStates rs2;
+        rs2.texture = &t2;
+
+        // Painter's Algorithm: Draw the furthest object (larger Z) first
+        if (z1 > z2) {
+            target.draw(quad1, rs1);
+            target.draw(quad2, rs2);
+        }
+        else {
+            target.draw(quad2, rs2);
+            target.draw(quad1, rs1);
+        }
+
+        return;
+    }
+
+    }
+
 
     // 3. DRAWING
     target.clear(sf::Color::Black);
@@ -418,7 +661,7 @@ int main()
         "Slide Left", "Slide Right", "Slide Top", "Slide Bottom",
         "Box In", "Box Out", "Fade to Black", "Cross-Fade",
         "Page Turn Horizontal", "Page Turn Vertical", "Shutter Open",
-        "Blur Fade"
+        "Blur Fade", "3D CUbe Rotation", "Ring"
     };
 
     sf::Clock deltaClock;
