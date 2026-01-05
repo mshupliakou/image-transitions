@@ -1,65 +1,29 @@
 ﻿#include "pch.h"
 #include <iostream>
 #include <cstdint>    // Required for std::uint8_t (Strict types in SFML 3.0)
-#include <filesystem> // C++17 standard library for creating folders and managing paths
-#include <sstream>    // Required for string stream manipulations (constructing filenames)
+#include <filesystem> // C++17 library for creating folders and handling paths
+#include <sstream>    // Required for string stream manipulations (creating filenames)
 #include <iomanip>    // Required for std::setw, std::setfill (formatting numbers like 001, 002)
 
-// Create an alias for std::filesystem to save typing 'std::filesystem' repeatedly
+// Create an alias for std::filesystem to save typing
 namespace fs = std::filesystem;
 
 // --- WINDOWS API BLOCK ---
-// We need the Windows API to access native File Explorer dialogs.
+// We need Windows API for file/folder dialogs and opening Explorer.
 #define NOMINMAX      // Prevents Windows headers from defining min/max macros that conflict with std::min/std::max
 #include <Windows.h>
 #include <commdlg.h>  // Standard Open File Dialog library
 #include <shellapi.h> // For ShellExecute (to open folder in Windows Explorer)
 #include <shlobj.h>   // For SHBrowseForFolder (Folder selection dialog)
 
-// --- SHADER CODE: LUMA WIPE (BRIGHTNESS TRANSITION) ---
-// This GLSL shader calculates the brightness of each pixel.
-// Bright pixels appear first (at low progress), dark pixels appear last.
-const std::string lumaShaderCode = R"(
-    uniform sampler2D texture;
-    uniform float progress; // Value from 0.0 to 1.0
-
-    void main() {
-        // Get the coordinate of the current pixel
-        vec2 coord = gl_TexCoord[0].xy;
-        
-        // Get the color of the pixel from the texture
-        vec4 pixel = texture2D(texture, coord);
-        
-        // Calculate Luminance (Perceived Brightness)
-        // We use standard Rec. 601 coefficients: Red 30%, Green 59%, Blue 11%
-        float luma = dot(pixel.rgb, vec3(0.299, 0.587, 0.114));
-        
-        // Logic: 
-        // We want bright pixels (luma ~1.0) to appear EARLY (when progress is low).
-        // We want dark pixels (luma ~0.0) to appear LATE (when progress is high).
-        
-        // Threshold moves from 1.0 down to 0.0 as progress goes 0.0 -> 1.0
-        float threshold = 1.0 - progress;
-        
-        // Calculate Alpha (Transparency)
-        // If pixel_brightness > threshold, alpha becomes 1.0 (Visible).
-        // smoothstep is used to create a soft edge instead of a harsh pixelated line.
-        float alpha = smoothstep(threshold, threshold + 0.1, luma);
-        
-        // Output the pixel with the modified alpha
-        gl_FragColor = vec4(pixel.rgb, pixel.a * alpha);
-    }
-)";
-
 // --- HELPER FUNCTION: OPEN FILE DIALOG ---
 // Opens a native Windows dialog to select an image file.
-// Returns the file path as a string, or empty string if cancelled.
 std::string OpenFileDialog(HWND ownerHandle)
 {
     OPENFILENAMEA ofn; // Structure containing dialog settings
-    char fileName[MAX_PATH] = ""; // Buffer to store the result path
+    char fileName[MAX_PATH] = ""; // Buffer to store the result
 
-    // Initialize memory with zeros to avoid garbage values
+    // Initialize memory with zeros
     ZeroMemory(&ofn, sizeof(ofn));
 
     ofn.lStructSize = sizeof(ofn);
@@ -86,7 +50,7 @@ std::string SelectFolderDialog(HWND ownerHandle)
     // Flags: Only allow file system directories, use the "New Style" dialog
     bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
 
-    // Open the dialog and get the Item ID List (pidl)
+    // Open the dialog
     LPITEMIDLIST pidl = SHBrowseForFolderA(&bi);
 
     if (pidl != 0)
@@ -111,8 +75,8 @@ void SetupModernStyle()
     // Rounding makes the UI look modern (like Windows 11 or macOS)
     style.WindowRounding = 12.0f;
     style.ChildRounding = 12.0f;
-    style.FrameRounding = 6.0f;    // Buttons
-    style.GrabRounding = 6.0f;     // Sliders
+    style.FrameRounding = 6.0f;
+    style.GrabRounding = 6.0f;
     style.PopupRounding = 12.0f;
     style.ScrollbarRounding = 12.0f;
 
@@ -140,12 +104,47 @@ void SetupModernStyle()
     colors[ImGuiCol_Text] = ImVec4(0.90f, 0.90f, 0.95f, 1.00f); // Almost white text
 }
 
+// --- SHADER ROZMYCIA (BLUR) ---
+const std::string blurShaderCode = R"(
+    uniform sampler2D texture;
+    uniform float blurRadius; // 0.0 do 1.0
+
+    void main() {
+        vec2 texCoord = gl_TexCoord[0].xy;
+        vec4 pixel = texture2D(texture, texCoord);
+        
+        if (blurRadius < 0.001) {
+            gl_FragColor = pixel * gl_Color;
+            return;
+        }
+
+        vec4 sum = vec4(0.0);
+        float weightSum = 0.0;
+        
+        // ZMIANA KRYTYCZNA: Ekstremalnie mały krok (0.00005).
+        // To skleja próbki w jednolitą masę.
+        float spread = blurRadius * 0.00005; 
+
+        // Pętla 17x17 (289 próbek na piksel)
+        for (float x = -8.0; x <= 8.0; x += 1.0) {
+            for (float y = -8.0; y <= 8.0; y += 1.0) {
+                float weight = exp(-(x*x + y*y) / 40.0);
+                vec2 offset = vec2(x, y) * spread;
+                sum += texture2D(texture, texCoord + offset) * weight;
+                weightSum += weight;
+            }
+        }
+        
+        gl_FragColor = (sum / weightSum) * gl_Color;
+    }
+)";
+
 // --- CORE RENDERING LOGIC ---
 // This function calculates the mathematics for every transition.
 // It is designed to work with ANY RenderTarget (Window for preview, or RenderTexture for saving).
 // Params:
-// - target: Where to draw? (The Window or the File buffer)
-// - type: Which transition effect to use?
+// - target: Where to draw?
+// - type: Which transition effect?
 // - progress: 0.0 (start) to 1.0 (end)
 // - s1, s2: The sprites
 // - t1, t2: The textures (needed to check sizes)
@@ -184,6 +183,7 @@ void RenderTransitionFrame(sf::RenderTarget& target, int type, float progress,
     // 2. MATH LOGIC
     int drawMode = 0; // 0=Draw Both, 1=Draw Only Sprite 1, 2=Draw Only Sprite 2
     float xOffset = 0.0f, yOffset = 0.0f;
+
 
     switch (type) {
     case 0: // Slide Left
@@ -269,13 +269,13 @@ void RenderTransitionFrame(sf::RenderTarget& target, int type, float progress,
         s2.setPosition({ width / 2.f, height / 2.f });
 
         if (progress <= 0.5f) {
-            // Shrink width of Image 1 to 0 (First half)
+            // Shrink width of Image 1 to 0
             drawMode = 1;
             float sf = 1.0f - (progress * 2.0f);
             s1.setScale({ (width / sz1.x) * sf, height / sz1.y });
         }
         else {
-            // Expand width of Image 2 from 0 (Second half)
+            // Expand width of Image 2 from 0
             drawMode = 2;
             float sf = (progress - 0.5f) * 2.0f;
             s2.setScale({ (width / sz2.x) * sf, height / sz2.y });
@@ -321,34 +321,292 @@ void RenderTransitionFrame(sf::RenderTarget& target, int type, float progress,
     }
     break;
 
-    case 11: // Luma Wipe (Brightness Based)
+    case 11: // Blur Fade
     {
-        // 1. Load the shader (only once)
-        static sf::Shader lumaShader;
+        // 1. Loading
+        static sf::Shader shader;
         static bool loaded = false;
         if (!loaded) {
-            // Load from the string constant defined at the top of the file
-            if (lumaShader.loadFromMemory(lumaShaderCode, sf::Shader::Type::Fragment)) {
-                // Tell shader which texture to use (optional in SFML but good practice)
-                lumaShader.setUniform("texture", sf::Shader::CurrentTexture);
+            if (shader.loadFromMemory(blurShaderCode, sf::Shader::Type::Fragment)) {
+                shader.setUniform("texture", sf::Shader::CurrentTexture);
             }
             loaded = true;
         }
 
-        // 2. Pass the progress to the shader
-        lumaShader.setUniform("progress", progress);
+        // 2. Strength
+        float blurStrength = 0.0f;
+        if (progress <= 0.5f) {
+            blurStrength = progress * 2.0f;
+        }
+        else {
+            blurStrength = (1.0f - progress) * 2.0f;
+        }
 
-        // 3. Draw Setup
-        // We draw Image 1 normally as the background.
-        // We draw Image 2 ON TOP using the shader. 
-        // The shader will make parts of Image 2 transparent based on brightness.
-        target.draw(s1); // Background
-        target.draw(s2, &lumaShader); // Foreground with Luma Mask
+        shader.setUniform("blurRadius", blurStrength * 150.0f);
 
-        return; // Exit early since we handled drawing manually
+        // 3. RDrawing
+        s1.setColor(sf::Color::White);
+        s2.setColor(sf::Color::White);
+
+        if (progress <= 0.01f) target.draw(s1);
+        else if (progress >= 0.99f) target.draw(s2);
+        else {
+            if (progress < 0.45f) target.draw(s1, &shader);
+            else if (progress > 0.55f) target.draw(s2, &shader);
+            else {
+                float mix = (progress - 0.45f) * 10.0f;
+                s1.setColor({ 255, 255, 255, (std::uint8_t)(255 * (1.0f - mix)) });
+                target.draw(s1, &shader);
+                s2.setColor({ 255, 255, 255, (std::uint8_t)(255 * mix) });
+                target.draw(s2, &shader);
+            }
+        }
+        return;
     }
     break;
+
+    case 12: // Cube Rotate 90°
+    {
+        // 1. QUALITY SETTINGS
+        t1.setSmooth(true);
+        t2.setSmooth(true);
+
+        // CONFIGURATION
+        float cx = width / 2.f;
+        float cy = height / 2.f;
+        float fov = 800.f;
+
+        // Number of strips (TriangleStrip). 
+        // 96 strips ensure the image is rigid (no waving effect) 
+        // while maintaining the full sharpness of the texture.
+        const int STRIPS = 96;
+
+        float angle = progress * 1.5707963f; // 0..90 degrees
+
+        // 2. SCALING (MAINTAIN ORIGINAL ASPECT RATIO)
+        sf::Vector2f scale1 = s1.getScale();
+        sf::Vector2f scale2 = s2.getScale();
+
+        // Wall dimensions calculated based on the sprite scale declared earlier
+        float faceW = t1.getSize().x * scale1.x;
+        float faceH = t1.getSize().y * scale1.y;
+
+        // Depth of the cube equals the width of the second image
+        float cubeDepth = t2.getSize().x * scale2.x;
+        float halfD = cubeDepth / 2.0f;
+
+        //3. MATH HELPERS
+
+        auto transformPoint = [&](sf::Vector3f p) -> sf::Vector3f {
+            float pz = p.z - halfD;
+            float px = p.x;
+            float c = std::cos(angle);
+            float s = std::sin(angle);
+            // Rotate around Y axis
+            return { px * c + pz * s, p.y, -px * s + pz * c + halfD };
+            };
+
+        auto project = [&](sf::Vector3f p) -> sf::Vector2f {
+            float scale = fov / (fov + p.z);
+            return { cx + p.x * scale, cy + p.y * scale };
+            };
+
+        // Shading calculation
+        auto getShade = [&](float baseAngle) -> sf::Color {
+            float currentAngle = std::abs(baseAngle - std::abs(progress * 90.0f));
+            float rad = currentAngle * 0.017453f;
+            float light = std::cos(rad);
+            if (light < 0) light = 0;
+
+            float brightness = 0.6f + (light * 0.4f);
+            std::uint8_t val = static_cast<std::uint8_t>(255 * brightness);
+            return sf::Color(val, val, val);
+            };
+
+        sf::Color shade1 = getShade(0.0f);
+        sf::Color shade2 = getShade(90.0f);
+
+        // 4. DRAWING WITH TRIANGLE STRIP
+        auto drawStripMesh = [&](sf::Texture& tex, sf::Color col, bool isSideFace)
+            {
+                sf::VertexArray va(sf::PrimitiveType::TriangleStrip, (STRIPS + 1) * 2);
+
+                float localW = faceW;
+                float localH = faceH;
+
+                float startX = -localW / 2.0f;
+                float yTop = -localH / 2.0f;
+                float yBot = localH / 2.0f;
+
+                for (int i = 0; i <= STRIPS; ++i)
+                {
+                    float u = (float)i / STRIPS; // 0.0 -> 1.0
+
+                    sf::Vector3f pTop, pBot;
+
+                    if (!isSideFace) {
+                        // FRONT FACE
+                        float x = startX + (u * localW);
+                        pTop = { x, yTop, 0.0f };
+                        pBot = { x, yBot, 0.0f };
+                    }
+                    else {
+                        // SIDE FACE
+                        float z = u * cubeDepth;
+                        float fixedX = localW / 2.0f;
+                        pTop = { fixedX, yTop, z };
+                        pBot = { fixedX, yBot, z };
+                    }
+
+                    pTop = transformPoint(pTop);
+                    pBot = transformPoint(pBot);
+
+                    sf::Vector2f sTop = project(pTop);
+                    sf::Vector2f sBot = project(pBot);
+
+                    // Texture mapping 1:1
+                    float tx = u * tex.getSize().x;
+                    float tyTop = 0.0f;
+                    float tyBot = (float)tex.getSize().y;
+
+                    int idx = i * 2;
+                    va[idx].position = sTop;
+                    va[idx].texCoords = { tx, tyTop };
+                    va[idx].color = col;
+
+                    va[idx + 1].position = sBot;
+                    va[idx + 1].texCoords = { tx, tyBot };
+                    va[idx + 1].color = col;
+                }
+
+                sf::RenderStates rs;
+                rs.texture = &tex;
+                target.draw(va, rs);
+            };
+
+        target.clear(sf::Color::Black);
+
+        //5. RENDERING (Depth Sorting)
+        sf::Vector3f tf = transformPoint({ 0.f, 0.f, 0.f });
+        sf::Vector3f ts = transformPoint({ faceW / 2.f, 0.f, cubeDepth / 2.f });
+
+        if (tf.z > ts.z) {
+            drawStripMesh(t1, shade1, false);
+            drawStripMesh(t2, shade2, true);
+        }
+        else {
+            drawStripMesh(t2, shade2, true);
+            drawStripMesh(t1, shade1, false);
+        }
+
+        return;
     }
+
+
+    case 13: // Ring Transition 
+    {
+        float cx = width / 2.f;
+        float cy = height / 2.f;
+
+        float radius = 1000.f;  // Orbit radius (how far sideways it moves)
+        float depth = 670.f;  // Perspective: lower value = stronger "3D" effect (fisheye)
+
+        // Convert progress (0..1) to radians (0..PI/2)
+        float a1 = progress * 1.5707963f;          // Image 1: 0 -> 90 degrees
+        float a2 = (1.0f - progress) * 1.5707963f; // Image 2: 90 -> 0 degrees
+
+        auto ringPos = [&](float angle, float sideSign)
+            {
+                // sideSign: +1 = right, -1 = left
+                float x = sideSign * (radius - std::cos(angle) * radius);
+                float z = std::sin(angle) * radius;
+                float s = depth / (depth + z); // Perspective scale factor (0.0 to 1.0)
+                return std::tuple<float, float, float>(x, z, s);
+            };
+
+
+        // IMAGE 1 - Starts at center, moves right along the arc
+        auto [x1, z1, s1] = ringPos(a1, +1.f);
+
+        sf::VertexArray quad1(sf::PrimitiveType::Triangles, 6);
+
+        // NOTE: Calculations are based on CANVAS size, not texture size
+        float w1 = width * s1;
+        float h1 = height * s1;
+
+        float left1 = cx + x1 - w1 / 2.f;
+        float top1 = cy - h1 / 2.f;
+        float right1 = left1 + w1;
+        float bottom1 = top1 + h1;
+
+        // Set vertex positions
+        quad1[0].position = { left1,  top1 };
+        quad1[1].position = { right1, top1 };
+        quad1[2].position = { right1, bottom1 };
+        quad1[3].position = { left1,  top1 };
+        quad1[4].position = { right1, bottom1 };
+        quad1[5].position = { left1,  bottom1 };
+
+        // Texture Coordinates - Map full texture
+        quad1[0].texCoords = { 0.f, 0.f };
+        quad1[1].texCoords = { (float)t1.getSize().x, 0.f };
+        quad1[2].texCoords = { (float)t1.getSize().x, (float)t1.getSize().y };
+        quad1[3].texCoords = { 0.f, 0.f };
+        quad1[4].texCoords = { (float)t1.getSize().x, (float)t1.getSize().y };
+        quad1[5].texCoords = { 0.f, (float)t1.getSize().y };
+
+
+        // IMAGE 2 - Starts at left (background), moves towards center
+        auto [x2, z2, s2] = ringPos(a2, -1.f);
+
+        sf::VertexArray quad2(sf::PrimitiveType::Triangles, 6);
+
+        float w2 = width * s2;
+        float h2 = height * s2;
+
+        float left2 = cx + x2 - w2 / 2.f;
+        float top2 = cy - h2 / 2.f;
+        float right2 = left2 + w2;
+        float bottom2 = top2 + h2;
+
+        quad2[0].position = { left2,  top2 };
+        quad2[1].position = { right2, top2 };
+        quad2[2].position = { right2, bottom2 };
+        quad2[3].position = { left2,  top2 };
+        quad2[4].position = { right2, bottom2 };
+        quad2[5].position = { left2,  bottom2 };
+
+        quad2[0].texCoords = { 0.f, 0.f };
+        quad2[1].texCoords = { (float)t2.getSize().x, 0.f };
+        quad2[2].texCoords = { (float)t2.getSize().x, (float)t2.getSize().y };
+        quad2[3].texCoords = { 0.f, 0.f };
+        quad2[4].texCoords = { (float)t2.getSize().x, (float)t2.getSize().y };
+        quad2[5].texCoords = { 0.f, (float)t2.getSize().y };
+
+        // PERSPECTIVE DRAWING (Depth Sorting)
+        target.clear(sf::Color::Black);
+
+        sf::RenderStates rs1;
+        rs1.texture = &t1;
+
+        sf::RenderStates rs2;
+        rs2.texture = &t2;
+
+        // Painter's Algorithm: Draw the furthest object (larger Z) first
+        if (z1 > z2) {
+            target.draw(quad1, rs1);
+            target.draw(quad2, rs2);
+        }
+        else {
+            target.draw(quad2, rs2);
+            target.draw(quad1, rs1);
+        }
+
+        return;
+    }
+
+    }
+
 
     // 3. DRAWING
     target.clear(sf::Color::Black);
@@ -399,12 +657,11 @@ int main()
     // Store the output folder path. Default: "SavedAnimation" next to the .exe
     std::string outputFolderPath = (fs::current_path() / "SavedAnimation").string();
 
-    // List of transition names for the Dropdown menu
     const char* transitionNames[] = {
         "Slide Left", "Slide Right", "Slide Top", "Slide Bottom",
         "Box In", "Box Out", "Fade to Black", "Cross-Fade",
         "Page Turn Horizontal", "Page Turn Vertical", "Shutter Open",
-        "Luma Wipe (Brightness)" // <-- New Transition Added
+        "Blur Fade", "3D CUbe Rotation", "Ring"
     };
 
     sf::Clock deltaClock;
