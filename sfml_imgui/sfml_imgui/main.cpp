@@ -321,7 +321,7 @@ void RenderTransitionFrame(sf::RenderTarget& target, int type, float progress,
     }
     break;
 
-    case 11: // Blur Fade
+    case 12: // Blur Fade
     {
         // 1. Loading
         static sf::Shader shader;
@@ -365,7 +365,7 @@ void RenderTransitionFrame(sf::RenderTarget& target, int type, float progress,
     }
     break;
 
-    case 12: // Cube Rotate 90°
+    case 13: // Cube Rotate 90°
     {
         // 1. QUALITY SETTINGS
         t1.setSmooth(true);
@@ -503,7 +503,7 @@ void RenderTransitionFrame(sf::RenderTarget& target, int type, float progress,
     }
 
 
-    case 13: // Ring Transition 
+    case 14: // Ring Transition 
     {
         float cx = width / 2.f;
         float cy = height / 2.f;
