@@ -640,8 +640,34 @@ void RenderTransitionFrame(sf::RenderTarget& target, int type, float progress,
 
         return;
     }
+    case 14: // Luma Wipe (Brightness Based)
+    {
+        // 1. Load the shader (only once)
+        static sf::Shader lumaShader;
+        static bool loaded = false;
+        if (!loaded) {
+            // Load from the string constant defined at the top of the file
+            if (lumaShader.loadFromMemory(lumaShaderCode, sf::Shader::Type::Fragment)) {
+                // Tell shader which texture to use (optional in SFML but good practice)
+                lumaShader.setUniform("texture", sf::Shader::CurrentTexture);
+            }
+            loaded = true;
+        }
 
+        // 2. Pass the progress to the shader
+        lumaShader.setUniform("progress", progress);
+
+        // 3. Draw Setup
+        // We draw Image 1 normally as the background.
+        // We draw Image 2 ON TOP using the shader. 
+        // The shader will make parts of Image 2 transparent based on brightness.
+        target.draw(s1); // Background
+        target.draw(s2, &lumaShader); // Foreground with Luma Mask
+
+        return; // Exit early since we handled drawing manually
     }
+    break;
+        }
 
 
     // 3. DRAWING
@@ -697,7 +723,7 @@ int main()
         "Slide Left", "Slide Right", "Slide Top", "Slide Bottom",
         "Box In", "Box Out", "Fade to Black", "Cross-Fade",
         "Page Turn Horizontal", "Page Turn Vertical", "Shutter Open",
-        "Blur Fade", "3D CUbe Rotation", "Ring"
+        "Blur Fade", "3D CUbe Rotation", "Ring", "Luma Brightness"
     };
 
     sf::Clock deltaClock;
