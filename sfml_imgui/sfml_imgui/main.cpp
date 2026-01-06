@@ -186,77 +186,84 @@ void ApplyCpuLumaWipeOptimized(const sf::Image& imgA, const sf::Image& imgB, sf:
     dstTex.update(resultPixels.data());
 }
 
-// --- OPTIMIZED CPU BLUR (Two-Pass Separable + Multithreading) ---
+// OPTIMIZED CPU BLUR 
 void ApplyCpuBlurOptimized(const sf::Image& src, sf::Texture& dstTex, int radius)
 {
+    // If radius is 0, we just show the original image
     if (radius < 1) {
+        // Ensure texture size matches the original image before updating
+        if (dstTex.getSize() != src.getSize()) {
+            dstTex.resize(src.getSize());
+        }
         dstTex.update(src);
         return;
     }
 
-    sf::Vector2u size = src.getSize();
-    const std::uint8_t* pixels = src.getPixelsPtr();
+    sf::Vector2u orgSize = src.getSize();
+    const int SCALE = 4;
+    sf::Vector2u smallSize(orgSize.x / SCALE, orgSize.y / SCALE);
 
-    static std::vector<uint8_t> pass1;
-    static std::vector<uint8_t> pass2;
-    
-    size_t totalSize = size.x * size.y * 4;
-    if (pass1.size() != totalSize) { pass1.resize(totalSize); pass2.resize(totalSize); }
+    // Safety check: avoid processing if image is too small
+    if (smallSize.x < 1 || smallSize.y < 1) return;
 
-    int w = size.x;
-    int h = size.y;
+    // 1. Downsample logic
+    static std::vector<uint8_t> smallPixels;
+    if (smallPixels.size() != smallSize.x * smallSize.y * 4)
+        smallPixels.resize(smallSize.x * smallSize.y * 4);
 
-    unsigned int numThreads = std::thread::hardware_concurrency();
-    std::vector<std::future<void>> futures;
-    int rowsPerThread = h / numThreads;
+    const uint8_t* srcPixels = src.getPixelsPtr();
 
-    // PASS 1: HORIZONTAL
-    for (unsigned int i = 0; i < numThreads; ++i) {
-        int startY = i * rowsPerThread;
-        int endY = (i == numThreads - 1) ? h : (i + 1) * rowsPerThread;
-
-        futures.push_back(std::async(std::launch::async, [=]() {
-            for (int y = startY; y < endY; ++y) {
-                for (int x = 0; x < w; ++x) {
-                    int r = 0, g = 0, b = 0, count = 0;
-                    int startK = std::max(0, x - radius);
-                    int endK = std::min(w - 1, x + radius);
-                    for (int k = startK; k <= endK; ++k) {
-                        int idx = (y * w + k) * 4;
-                        r += pixels[idx]; g += pixels[idx+1]; b += pixels[idx+2]; count++;
-                    }
-                    int destIdx = (y * w + x) * 4;
-                    pass1[destIdx] = r/count; pass1[destIdx+1] = g/count; pass1[destIdx+2] = b/count; pass1[destIdx+3] = 255;
-                }
-            }
-        }));
+    for (unsigned int y = 0; y < smallSize.y; ++y) {
+        for (unsigned int x = 0; x < smallSize.x; ++x) {
+            int srcIdx = ((y * SCALE) * orgSize.x + (x * SCALE)) * 4;
+            int dstIdx = (y * smallSize.x + x) * 4;
+            std::memcpy(&smallPixels[dstIdx], &srcPixels[srcIdx], 4);
+        }
     }
-    for (auto& f : futures) f.wait();
-    futures.clear();
 
-    // PASS 2: VERTICAL
-    for (unsigned int i = 0; i < numThreads; ++i) {
-        int startY = i * rowsPerThread;
-        int endY = (i == numThreads - 1) ? h : (i + 1) * rowsPerThread;
+    // 2. Separable Blur on small buffer
+    int smallRadius = std::max(1, radius / SCALE);
+    static std::vector<uint8_t> tempBuffer;
+    if (tempBuffer.size() != smallPixels.size()) tempBuffer.resize(smallPixels.size());
 
-        futures.push_back(std::async(std::launch::async, [=]() {
-            for (int y = startY; y < endY; ++y) {
-                for (int x = 0; x < w; ++x) {
-                    int r = 0, g = 0, b = 0, count = 0;
-                    int startK = std::max(0, y - radius);
-                    int endK = std::min(h - 1, y + radius);
-                    for (int k = startK; k <= endK; ++k) {
-                        int idx = (k * w + x) * 4;
-                        r += pass1[idx]; g += pass1[idx+1]; b += pass1[idx+2]; count++;
-                    }
-                    int destIdx = (y * w + x) * 4;
-                    pass2[destIdx] = r/count; pass2[destIdx+1] = g/count; pass2[destIdx+2] = b/count; pass2[destIdx+3] = 255;
-                }
+    int w = smallSize.x;
+    int h = smallSize.y;
+
+    // Horizontal Pass
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            int r = 0, g = 0, b = 0, count = 0;
+            for (int k = -smallRadius; k <= smallRadius; ++k) {
+                int nx = std::max(0, std::min(w - 1, x + k));
+                int idx = (y * w + nx) * 4;
+                r += smallPixels[idx]; g += smallPixels[idx + 1]; b += smallPixels[idx + 2];
+                count++;
             }
-        }));
+            int outIdx = (y * w + x) * 4;
+            tempBuffer[outIdx] = r / count; tempBuffer[outIdx + 1] = g / count; tempBuffer[outIdx + 2] = b / count; tempBuffer[outIdx + 3] = 255;
+        }
     }
-    for (auto& f : futures) f.wait();
-    dstTex.update(pass2.data());
+
+    // Vertical Pass
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            int r = 0, g = 0, b = 0, count = 0;
+            for (int k = -smallRadius; k <= smallRadius; ++k) {
+                int ny = std::max(0, std::min(h - 1, y + k));
+                int idx = (ny * w + x) * 4;
+                r += tempBuffer[idx]; g += tempBuffer[idx + 1]; b += tempBuffer[idx + 2];
+                count++;
+            }
+            int outIdx = (y * w + x) * 4;
+            smallPixels[outIdx] = r / count; smallPixels[outIdx + 1] = g / count; smallPixels[outIdx + 2] = b / count; smallPixels[outIdx + 3] = 255;
+        }
+    }
+
+    // 3. Update Texture: ensure it matches the SMALL size
+    if (dstTex.getSize() != smallSize) {
+        dstTex.resize(smallSize);
+    }
+    dstTex.update(smallPixels.data());
 }
 
 // --- CORE RENDERING LOGIC ---
@@ -394,45 +401,61 @@ void RenderTransitionFrame(sf::RenderTarget& target, int type, float progress,
         s2.setPosition({ ex, 0.0f });
     }
     break;
-    case 11: // Blur Fade
+    case 11: // Blur Fade transition
     {
         static sf::Texture tempTex1, tempTex2;
-        // FIX: Replaced create() with resize() for SFML 3.0
-        if (tempTex1.getSize() != imgCache1.getSize()) tempTex1.resize(imgCache1.getSize());
-        if (tempTex2.getSize() != imgCache2.getSize()) tempTex2.resize(imgCache2.getSize());
 
-        int maxBlur = 12;
+        int maxBlur = 12; // Maximum blur radius
         int currentBlur = 0;
 
+        // Phase 1: Blur the first image (0% to 45% of progress)
         if (progress <= 0.45f) {
-            currentBlur = (int)(progress * 2.2f * maxBlur);
+            // Calculate growing blur radius
+            currentBlur = (int)(progress * (1.0f / 0.45f) * maxBlur);
+
             ApplyCpuBlurOptimized(imgCache1, tempTex1, currentBlur);
+
             sf::Sprite tempSprite(tempTex1);
+            // Dynamically calculate scale because tempTex1 is now 4x smaller than original
             sf::Vector2u sz = tempTex1.getSize();
-            tempSprite.setScale({ 1200.0f / sz.x, 800.0f / sz.y }); 
+            tempSprite.setScale({ 1200.0f / (float)sz.x, 800.0f / (float)sz.y });
+
             target.draw(tempSprite);
         }
+        // Phase 3: Un-blur the second image (55% to 100% of progress)
         else if (progress >= 0.55f) {
+            // Calculate decreasing blur radius
             float localP = (progress - 0.55f) / 0.45f;
             currentBlur = (int)((1.0f - localP) * maxBlur);
+
             ApplyCpuBlurOptimized(imgCache2, tempTex2, currentBlur);
+
             sf::Sprite tempSprite(tempTex2);
+            // Adjust scale to fit the 1200x800 window regardless of downsampling
             sf::Vector2u sz = tempTex2.getSize();
-            tempSprite.setScale({ 1200.0f / sz.x, 800.0f / sz.y });
+            tempSprite.setScale({ 1200.0f / (float)sz.x, 800.0f / (float)sz.y });
+
             target.draw(tempSprite);
         }
+        // Phase 2: Cross-fade between two blurred images (45% to 55% of progress)
         else {
+            // Both images are blurred at maximum radius
             ApplyCpuBlurOptimized(imgCache1, tempTex1, maxBlur);
             ApplyCpuBlurOptimized(imgCache2, tempTex2, maxBlur);
+
             sf::Sprite sA(tempTex1);
             sf::Sprite sB(tempTex2);
-            sf::Vector2u sz1 = tempTex1.getSize();
-            sf::Vector2u sz2 = tempTex2.getSize();
-            sA.setScale({ 1200.0f / sz1.x, 800.0f / sz1.y });
-            sB.setScale({ 1200.0f / sz2.x, 800.0f / sz2.y });
-            float mix = (progress - 0.45f) * 10.0f; 
+
+            // Apply scales for both sprites
+            sA.setScale({ 1200.0f / (float)tempTex1.getSize().x, 800.0f / (float)tempTex1.getSize().y });
+            sB.setScale({ 1200.0f / (float)tempTex2.getSize().x, 800.0f / (float)tempTex2.getSize().y });
+
+            // Calculate alpha blending (mix) factor for the cross-fade
+            float mix = (progress - 0.45f) * 10.0f; // Maps 0.45-0.55 range to 0.0-1.0
+
             sA.setColor({ 255, 255, 255, (std::uint8_t)(255 * (1.0f - mix)) });
             sB.setColor({ 255, 255, 255, (std::uint8_t)(255 * mix) });
+
             target.draw(sA);
             target.draw(sB);
         }
