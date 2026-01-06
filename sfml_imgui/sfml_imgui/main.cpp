@@ -102,87 +102,59 @@ void SetupModernStyle()
 void ApplyCpuLumaWipeOptimized(const sf::Image& imgA, const sf::Image& imgB, sf::Texture& dstTex, float progress)
 {
     sf::Vector2u size = imgA.getSize();
-    const std::uint8_t* pA = imgA.getPixelsPtr();
-    const std::uint8_t* pB = imgB.getPixelsPtr();
+    size_t totalPixels = (size_t)size.x * size.y;
 
-    size_t totalPixels = size.x * size.y;
-    if (!lumaCacheValid || lumaCache.size() != totalPixels)
-    {
+    // 1. Safety check: ensure images are not empty
+    if (totalPixels == 0) return;
+
+    // 2. Generate Luma Cache only once (when images change)
+    if (!lumaCacheValid || lumaCache.size() != totalPixels) {
         lumaCache.resize(totalPixels);
-        unsigned int numThreads = std::thread::hardware_concurrency();
-        unsigned int rowsPerThread = size.y / numThreads;
-        std::vector<std::future<void>> futures;
+        const uint8_t* pB = imgB.getPixelsPtr();
 
-        for (unsigned int i = 0; i < numThreads; ++i) {
-            unsigned int startY = i * rowsPerThread;
-            unsigned int endY = (i == numThreads - 1) ? size.y : (i + 1) * rowsPerThread;
-
-            futures.push_back(std::async(std::launch::async, [=]() {
-                float scaleX = (float)imgB.getSize().x / (float)size.x;
-                float scaleY = (float)imgB.getSize().y / (float)size.y;
-                int widthB = imgB.getSize().x;
-
-                for (unsigned int y = startY; y < endY; ++y) {
-                    for (unsigned int x = 0; x < size.x; ++x) {
-                        int xb = (int)(x * scaleX);
-                        int yb = (int)(y * scaleY);
-                        size_t idxB = (yb * widthB + xb) * 4;
-
-                        uint8_t r = pB[idxB];
-                        uint8_t g = pB[idxB + 1];
-                        uint8_t b = pB[idxB + 2];
-                        lumaCache[y * size.x + x] = (uint8_t)((299 * r + 587 * g + 114 * b) / 1000);
-                    }
-                }
-            }));
+        for (size_t i = 0; i < totalPixels; ++i) {
+            size_t idx = i * 4;
+            // Standard luminance formula: 0.299R + 0.587G + 0.114B
+            // Multiplied by 1000 to stay in integer math for speed
+            lumaCache[i] = (uint8_t)((299 * pB[idx] + 587 * pB[idx + 1] + 114 * pB[idx + 2]) / 1000);
         }
-        for (auto& f : futures) f.wait();
         lumaCacheValid = true;
     }
 
-    static std::vector<std::uint8_t> resultPixels;
+    // 3. Prepare result buffer
+    static std::vector<uint8_t> resultPixels;
     if (resultPixels.size() != totalPixels * 4) resultPixels.resize(totalPixels * 4);
 
+    const uint8_t* pA = imgA.getPixelsPtr();
+    const uint8_t* pB = imgB.getPixelsPtr();
+
+    // Threshold determines which pixels from Image B are shown
     int threshold = static_cast<int>((1.0f - progress) * 255.0f);
-    unsigned int numThreads = std::thread::hardware_concurrency();
-    unsigned int rowsPerThread = size.y / numThreads;
-    std::vector<std::future<void>> futures;
 
-    for (unsigned int i = 0; i < numThreads; ++i) {
-        unsigned int startY = i * rowsPerThread;
-        unsigned int endY = (i == numThreads - 1) ? size.y : (i + 1) * rowsPerThread;
+    // 4. Single-threaded loop is faster here than spawning threads 60 times/sec
+    for (size_t i = 0; i < totalPixels; ++i) {
+        size_t pixelIdx = i * 4;
 
-        futures.push_back(std::async(std::launch::async, [=]() {
-            float scaleX = (float)imgB.getSize().x / (float)size.x;
-            float scaleY = (float)imgB.getSize().y / (float)size.y;
-            int widthB = imgB.getSize().x;
-            int widthA = size.x;
-
-            for (unsigned int y = startY; y < endY; ++y) {
-                size_t offsetA = y * widthA;
-                size_t pixelIdx = offsetA * 4;
-
-                for (unsigned int x = 0; x < widthA; ++x) {
-                    if (lumaCache[offsetA + x] >= threshold) {
-                        int xb = (int)(x * scaleX);
-                        int yb = (int)(y * scaleY);
-                        size_t idxB = (yb * widthB + xb) * 4;
-                        resultPixels[pixelIdx]     = pB[idxB];
-                        resultPixels[pixelIdx + 1] = pB[idxB + 1];
-                        resultPixels[pixelIdx + 2] = pB[idxB + 2];
-                        resultPixels[pixelIdx + 3] = 255;
-                    } else {
-                        resultPixels[pixelIdx]     = pA[pixelIdx];
-                        resultPixels[pixelIdx + 1] = pA[pixelIdx + 1];
-                        resultPixels[pixelIdx + 2] = pA[pixelIdx + 2];
-                        resultPixels[pixelIdx + 3] = 255;
-                    }
-                    pixelIdx += 4;
-                }
-            }
-        }));
+        // If the luma of pixel in Image B is higher than threshold, show Image B
+        if (lumaCache[i] >= threshold) {
+            // Using memcpy or direct assignment is very fast
+            resultPixels[pixelIdx] = pB[pixelIdx];
+            resultPixels[pixelIdx + 1] = pB[pixelIdx + 1];
+            resultPixels[pixelIdx + 2] = pB[pixelIdx + 2];
+        }
+        else {
+            // Otherwise, keep showing Image A
+            resultPixels[pixelIdx] = pA[pixelIdx];
+            resultPixels[pixelIdx + 1] = pA[pixelIdx + 1];
+            resultPixels[pixelIdx + 2] = pA[pixelIdx + 2];
+        }
+        resultPixels[pixelIdx + 3] = 255; // Alpha always 255
     }
-    for (auto& f : futures) f.wait();
+
+    // 5. Update Texture with safety check for size
+    if (dstTex.getSize() != size) {
+        dstTex.resize(size);
+    }
     dstTex.update(resultPixels.data());
 }
 
@@ -568,17 +540,25 @@ void RenderTransitionFrame(sf::RenderTarget& target, int type, float progress,
         else { target.draw(quad2, rs2); target.draw(quad1, rs1); }
         return;
     }
-    case 14: // Luma Wipe
+    case 14: // Luma Wipe transition
     {
+        // resultTex as a static variable so it persists between frames
         static sf::Texture resultTex;
-        // FIX: Replaced create() with resize() for SFML 3.0
-        if (resultTex.getSize() != imgCache1.getSize()) {
-            resultTex.resize(imgCache1.getSize());
-        }
+
+        // Safety check: Don't process if images are not loaded
+        if (imgCache1.getSize().x == 0 || imgCache2.getSize().x == 0) return;
+
+        // Calling the optimized CPU function
         ApplyCpuLumaWipeOptimized(imgCache1, imgCache2, resultTex, progress);
+
         sf::Sprite s(resultTex);
         sf::Vector2u sz = resultTex.getSize();
-        s.setScale({ 1200.0f / sz.x, 800.0f / sz.y });
+
+        // Scale sprite to fit the target window (1200x800)
+        if (sz.x > 0 && sz.y > 0) {
+            s.setScale({ 1200.0f / (float)sz.x, 800.0f / (float)sz.y });
+        }
+
         target.draw(s);
         return;
     }
