@@ -611,6 +611,12 @@ int main()
     int transitionType = 0; 
     int framesCount = 60;   
 
+    // --- FPS COUNTER VARIABLES ---
+    sf::Clock fpsClock;       // Clock to measure elapsed time per frame
+    float fpsValue = 0;       // Current FPS value
+    int frameCounter = 0;     // Counter for frames in the current second
+    sf::Time timeSinceLastUpdate = sf::Time::Zero; // Accumulated time
+
     std::string outputFolderPath = (fs::current_path() / "SavedAnimation").string();
 
     const char* transitionNames[] = {
@@ -630,10 +636,21 @@ int main()
             if (event->is<sf::Event::Closed>()) window.close();
         }
 
+        // Update FPS counter
+        sf::Time dt = fpsClock.restart();
+        timeSinceLastUpdate += dt;
+        frameCounter++;
+
+        if (timeSinceLastUpdate.asSeconds() >= 1.0f) {
+            fpsValue = (float)frameCounter; // FPS is the number of frames per 1 second
+            frameCounter = 0;
+            timeSinceLastUpdate -= sf::seconds(1.0f);
+        }
+
         ImGui::SFML::Update(window, deltaClock.restart());
 
-        ImGui::SetNextWindowPos(ImVec2(820, 20), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(350, 760), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowPos(ImVec2(820, 10), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(350, 780), ImGuiCond_FirstUseEver);
 
         ImGui::Begin("Settings", nullptr, ImGuiWindowFlags_NoCollapse);
         ImGui::TextDisabled("MEDIA LIBRARY");
@@ -687,12 +704,27 @@ int main()
         }
 
         ImGui::Spacing();
+
         ImGui::Text("Total Frames:");
         ImGui::InputInt("##frames", &framesCount);
         if (framesCount < 10) framesCount = 10;   
         if (framesCount > 1000) framesCount = 1000; 
 
         ImGui::Spacing();
+
+        // Display Performance Info
+        ImGui::TextDisabled("PERFORMANCE");
+        ImGui::Text("Current FPS: %.1f", fpsValue);
+
+        // Add a color indicator: Green if FPS > 50, Yellow if > 25, Red if lower
+        if (fpsValue > 50)
+            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "Status: Excellent");
+        else if (fpsValue > 25)
+            ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "Status: Playable");
+        else
+            ImGui::TextColored(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), "Status: Slow (CPU Bottleneck)");
+
+        ImGui::Separator();
 
         if (ImGui::Button(" RENDER & SAVE SEQUENCE ", ImVec2(320, 50)))
         {
