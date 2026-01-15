@@ -98,60 +98,77 @@ void SetupModernStyle()
     colors[ImGuiCol_Text] = ImVec4(0.90f, 0.90f, 0.95f, 1.00f);
 }
 
+sf::Image ResizeImageCPU(const sf::Image& original, unsigned int targetW, unsigned int targetH) {
+    // In SFML 3.0, we initialize the image size directly in the constructor
+    sf::Image resized(sf::Vector2u{ targetW, targetH }, sf::Color::Transparent);
+
+    sf::Vector2u origSize = original.getSize();
+
+    // Scaling factors based on the ratio between original and target sizes
+    float scaleX = static_cast<float>(origSize.x) / targetW;
+    float scaleY = static_cast<float>(origSize.y) / targetH;
+
+    for (unsigned int y = 0; y < targetH; ++y) {
+        for (unsigned int x = 0; x < targetW; ++x) {
+            // Map the coordinates of the target image back to the original image
+            unsigned int origX = static_cast<unsigned int>(x * scaleX);
+            unsigned int origY = static_cast<unsigned int>(y * scaleY);
+
+            // Bounds safety check
+            if (origX < origSize.x && origY < origSize.y) {
+                resized.setPixel({ x, y }, original.getPixel({ origX, origY }));
+            }
+        }
+    }
+    return resized;
+}
+
 // --- OPTIMIZED CPU LUMA WIPE (Multithreaded) ---
 void ApplyCpuLumaWipeOptimized(const sf::Image& imgA, const sf::Image& imgB, sf::Texture& dstTex, float progress)
 {
     sf::Vector2u size = imgA.getSize();
-    size_t totalPixels = (size_t)size.x * size.y;
+    size_t totalPixels = static_cast<size_t>(size.x) * size.y;
 
-    // 1. Safety check: ensure images are not empty
     if (totalPixels == 0) return;
 
-    // 2. Generate Luma Cache only once (when images change)
-    if (!lumaCacheValid || lumaCache.size() != totalPixels) {
+    static sf::Vector2u lastSize = { 0, 0 };
+
+    if (!lumaCacheValid || lastSize != size) {
         lumaCache.resize(totalPixels);
         const uint8_t* pB = imgB.getPixelsPtr();
 
         for (size_t i = 0; i < totalPixels; ++i) {
             size_t idx = i * 4;
-            // Standard luminance formula: 0.299R + 0.587G + 0.114B
-            // Multiplied by 1000 to stay in integer math for speed
             lumaCache[i] = (uint8_t)((299 * pB[idx] + 587 * pB[idx + 1] + 114 * pB[idx + 2]) / 1000);
         }
         lumaCacheValid = true;
+        lastSize = size;
     }
 
-    // 3. Prepare result buffer
     static std::vector<uint8_t> resultPixels;
     if (resultPixels.size() != totalPixels * 4) resultPixels.resize(totalPixels * 4);
 
     const uint8_t* pA = imgA.getPixelsPtr();
     const uint8_t* pB = imgB.getPixelsPtr();
 
-    // Threshold determines which pixels from Image B are shown
-    int threshold = static_cast<int>((1.0f - progress) * 255.0f);
+    int threshold = static_cast<int>((1.0f - (progress * 1.1f)) * 255.0f);
 
-    // 4. Single-threaded loop is faster here than spawning threads 60 times/sec
     for (size_t i = 0; i < totalPixels; ++i) {
         size_t pixelIdx = i * 4;
 
-        // If the luma of pixel in Image B is higher than threshold, show Image B
-        if (lumaCache[i] >= threshold) {
-            // Using memcpy or direct assignment is very fast
+        if (static_cast<int>(lumaCache[i]) >= threshold) {
             resultPixels[pixelIdx] = pB[pixelIdx];
             resultPixels[pixelIdx + 1] = pB[pixelIdx + 1];
             resultPixels[pixelIdx + 2] = pB[pixelIdx + 2];
         }
         else {
-            // Otherwise, keep showing Image A
             resultPixels[pixelIdx] = pA[pixelIdx];
             resultPixels[pixelIdx + 1] = pA[pixelIdx + 1];
             resultPixels[pixelIdx + 2] = pA[pixelIdx + 2];
         }
-        resultPixels[pixelIdx + 3] = 255; // Alpha always 255
+        resultPixels[pixelIdx + 3] = 255; 
     }
 
-    // 5. Update Texture with safety check for size
     if (dstTex.getSize() != size) {
         dstTex.resize(size);
     }
@@ -542,22 +559,32 @@ void RenderTransitionFrame(sf::RenderTarget& target, int type, float progress,
     }
     case 14: // Luma Wipe transition
     {
-        // resultTex as a static variable so it persists between frames
         static sf::Texture resultTex;
+        if (t1.getSize().x == 0 || t2.getSize().x == 0) return;
 
-        // Safety check: Don't process if images are not loaded
-        if (imgCache1.getSize().x == 0 || imgCache2.getSize().x == 0) return;
+        // 1. Create working copies (non-const) from textures
+        sf::Image workingImg1 = imgCache1;
+        sf::Image workingImg2 = imgCache2;
 
-        // Calling the optimized CPU function
-        ApplyCpuLumaWipeOptimized(imgCache1, imgCache2, resultTex, progress);
+        sf::Vector2u size1 = workingImg1.getSize();
+        sf::Vector2u size2 = workingImg2.getSize();
 
-        sf::Sprite s(resultTex);
-        sf::Vector2u sz = resultTex.getSize();
+        // 2. Logic: If sizes differ, resize both to the smallest common dimensions
+        if (size1 != size2) {
+            unsigned int minW = std::min(size1.x, size2.x);
+            unsigned int minH = std::min(size1.y, size2.y);
 
-        // Scale sprite to fit the target window (1200x800)
-        if (sz.x > 0 && sz.y > 0) {
-            s.setScale({ 1200.0f / (float)sz.x, 800.0f / (float)sz.y });
+            workingImg1 = ResizeImageCPU(workingImg1, minW, minH);
+            workingImg2 = ResizeImageCPU(workingImg2, minW, minH);
         }
+
+        // 3. Process the transition on CPU (no shaders used as per )
+        ApplyCpuLumaWipeOptimized(workingImg1, workingImg2, resultTex, progress);
+
+        // 4. Final display
+        sf::Sprite s(resultTex);
+        // Stretch the result to fill our standard 1200x800 canvas [cite: 11]
+        s.setScale({ 1200.0f / resultTex.getSize().x, 800.0f / resultTex.getSize().y });
 
         target.draw(s);
         return;
@@ -652,7 +679,7 @@ int main()
         ImGui::SetNextWindowPos(ImVec2(820, 10), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSize(ImVec2(350, 780), ImGuiCond_FirstUseEver);
 
-        ImGui::Begin("Settings", nullptr, ImGuiWindowFlags_NoCollapse);
+        ImGui::Begin("Settings", nullptr, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize);
         ImGui::TextDisabled("MEDIA LIBRARY");
         ImGui::Separator();
 
@@ -661,6 +688,7 @@ int main()
             if (!path.empty() && texture1.loadFromFile(path)) {
                 sprite1.setTexture(texture1, true);
                 cachedImage1 = texture1.copyToImage(); 
+                lumaCacheValid = false;
             }
         }
         ImGui::SameLine();
