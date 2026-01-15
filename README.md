@@ -49,5 +49,3 @@ The application includes a built-in FPS counter and status indicator:
 * **Yellow (Playable)**: Moderate load.
 * **Red (Slow)**: CPU bottleneck detected (usually during heavy CPU-based blur or luma operations on very large images).
 
----
-*Created by Mishail, Martyna, Yulia, Kris. Part of the Image Transitions project.*
