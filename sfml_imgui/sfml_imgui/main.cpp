@@ -260,6 +260,8 @@ void RenderTransitionFrame(sf::RenderTarget& target, int type, float progress,
     sf::Sprite& s1, sf::Sprite& s2, sf::Texture& t1, sf::Texture& t2,
     const sf::Image& imgCache1, const sf::Image& imgCache2)
 {
+    target.clear(sf::Color::Black);
+
     float width = 1200.0f;
     float height = 800.0f;
 
@@ -615,7 +617,6 @@ void RenderTransitionFrame(sf::RenderTarget& target, int type, float progress,
     }
     }
 
-    target.clear(sf::Color::Black);
     if (type == 5 || type == 10) { target.draw(s2); target.draw(s1); }
     else if (drawMode == 1) target.draw(s1);
     else if (drawMode == 2) target.draw(s2);
@@ -680,6 +681,25 @@ int main()
         ImGui::SetNextWindowSize(ImVec2(350, 780), ImGuiCond_FirstUseEver);
 
         ImGui::Begin("Settings", nullptr, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize);
+
+        // CLAMPING
+        ImVec2 pos = ImGui::GetWindowPos();   
+        ImVec2 size = ImGui::GetWindowSize(); 
+        float winW = 1200.0f; 
+        float winH = 800.0f;  
+
+        bool moved = false;
+
+        if (pos.x < 0) { pos.x = 0; moved = true; }
+        if (pos.y < 0) { pos.y = 0; moved = true; }
+
+        if (pos.x + size.x > winW) { pos.x = winW - size.x; moved = true; }
+        if (pos.y + size.y > winH) { pos.y = winH - size.y; moved = true; }
+
+        if (moved) {
+            ImGui::SetWindowPos(pos);
+        }
+
         ImGui::TextDisabled("MEDIA LIBRARY");
         ImGui::Separator();
 
